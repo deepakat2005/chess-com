@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+@theme {
+  --color-gray-900: #111827;
+  /* Or just trust the default theme if using @import "tailwindcss"; it imports the default theme */
+}
+
+/* In v4, we can usually just @apply if the build sees it. 
+   But simpler is to just use standard tailwind imports. 
+   Actually v4 default theme is included in @import "tailwindcss";
+*/
+
+body {
+  @apply bg-gray-900 text-white;
+}
