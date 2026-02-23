@@ -9,6 +9,9 @@ const Dashboard = () => {
     const { user, logout } = useContext(AuthContext);
     const navigate = useNavigate();
     const [games, setGames] = useState([]);
+    const [roomIdInput, setRoomIdInput] = useState('');
+    const [joinError, setJoinError] = useState('');
+    const [findingMatch, setFindingMatch] = useState(false);
 
     useEffect(() => {
         const fetchGames = async () => {
@@ -34,15 +37,27 @@ const Dashboard = () => {
     }, [user]);
 
     useEffect(() => {
-        socket.on('game_found', ({ roomId, color }) => {
+        const handleGameFound = ({ roomId, color }) => {
             console.log('Received game_found:', roomId, color);
+            setFindingMatch(false);
             navigate(`/play?mode=online&room=${roomId}`);
-        });
+        };
+
+        socket.on('game_found', handleGameFound);
 
         return () => {
-            socket.off('game_found');
+            socket.off('game_found', handleGameFound);
         };
     }, [navigate]);
+
+    // Cancel queue on unmount if still searching
+    useEffect(() => {
+        return () => {
+            if (findingMatch && user) {
+                socket.emit('leave_queue', { userId: user.id || user._id });
+            }
+        };
+    }, [findingMatch, user]);
 
     if (!user) {
         return <div className="text-white text-center mt-20">Loading profile...</div>;
@@ -96,13 +111,37 @@ const Dashboard = () => {
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div
                             onClick={() => {
-                                console.log('Emitting join_queue for user', user.id);
-                                socket.emit('join_queue', { userId: user.id });
+                                if (!findingMatch && user) {
+                                    const userId = user.id || user._id;
+                                    console.log('Emitting join_queue for user', userId);
+                                    setFindingMatch(true);
+                                    socket.emit('join_queue', { userId });
+                                }
                             }}
-                            className="bg-blue-600 hover:bg-blue-700 cursor-pointer p-8 rounded-xl shadow-lg transform transition hover:scale-105 flex flex-col items-center justify-center"
+                            className={`${findingMatch ? 'bg-blue-800 opacity-75 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 cursor-pointer'} p-8 rounded-xl shadow-lg transform transition hover:scale-105 flex flex-col items-center justify-center`}
                         >
-                            <h3 className="text-2xl font-bold mb-2">Find Match</h3>
-                            <p className="text-center text-blue-100">Play with Random Opponent</p>
+                            {findingMatch ? (
+                                <>
+                                    <div className="w-8 h-8 border-4 border-blue-300 border-t-white rounded-full animate-spin mb-2"></div>
+                                    <h3 className="text-2xl font-bold mb-2">Finding Match...</h3>
+                                    <p className="text-center text-blue-100">Searching for opponent</p>
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setFindingMatch(false);
+                                            socket.emit('leave_queue', { userId: user.id || user._id });
+                                        }}
+                                        className="mt-4 bg-red-600 hover:bg-red-700 text-white py-1 px-3 rounded text-sm font-bold"
+                                    >
+                                        Cancel
+                                    </button>
+                                </>
+                            ) : (
+                                <>
+                                    <h3 className="text-2xl font-bold mb-2">Find Match</h3>
+                                    <p className="text-center text-blue-100">Play with Random Opponent</p>
+                                </>
+                            )}
                         </div>
 
                         <div
@@ -122,6 +161,45 @@ const Dashboard = () => {
                         >
                             <h3 className="text-2xl font-bold mb-2">Vs Computer</h3>
                             <p className="text-center text-gray-300">Practice with Stockfish</p>
+                        </div>
+                    </div>
+
+                    {/* Join by Room ID */}
+                    <div className="bg-gray-800 p-6 rounded-lg shadow-lg">
+                        <h3 className="text-xl font-bold mb-4 text-purple-400">Join by Room ID</h3>
+                        {joinError && (
+                            <div className="mb-4 p-3 bg-red-600 text-white rounded text-sm">
+                                {joinError}
+                            </div>
+                        )}
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                placeholder="Enter room ID..."
+                                value={roomIdInput}
+                                onChange={(e) => {
+                                    setRoomIdInput(e.target.value);
+                                    setJoinError('');
+                                }}
+                                onKeyPress={(e) => {
+                                    if (e.key === 'Enter' && roomIdInput.trim()) {
+                                        navigate(`/play?mode=online&room=${roomIdInput}`);
+                                    }
+                                }}
+                                className="flex-1 px-4 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-purple-500 focus:outline-none"
+                            />
+                            <button
+                                onClick={() => {
+                                    if (roomIdInput.trim()) {
+                                        navigate(`/play?mode=online&room=${roomIdInput}`);
+                                    } else {
+                                        setJoinError('Please enter a room ID');
+                                    }
+                                }}
+                                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-6 rounded transition"
+                            >
+                                Join
+                            </button>
                         </div>
                     </div>
 

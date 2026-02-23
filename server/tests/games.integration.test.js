@@ -1,3 +1,4 @@
+require('./setup');
 const request = require('supertest');
 const express = require('express');
 const mongoose = require('mongoose');

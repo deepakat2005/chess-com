@@ -11,11 +11,16 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+const ALLOWED_ORIGINS = [
+    process.env.CLIENT_URL || "http://localhost:5173",
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:5174", "http://127.0.0.1:5174",
+    "http://localhost:5175", "http://127.0.0.1:5175"
+];
 
 const io = new Server(server, {
     cors: {
-        origin: CLIENT_URL,
+        origin: ALLOWED_ORIGINS,
         methods: ["GET", "POST"],
         credentials: true
     }
@@ -23,7 +28,7 @@ const io = new Server(server, {
 
 // Middleware
 app.use(cors({
-    origin: [CLIENT_URL, "http://localhost:5173", "http://127.0.0.1:5173"],
+    origin: ALLOWED_ORIGINS,
     credentials: true
 }));
 app.use(express.json());
@@ -47,15 +52,31 @@ const activeGames = {};
 // Matchmaking queue: [{ socketId, userId }]
 const queue = [];
 
+// Socket to user mapping: { socketId -> userId }
+const socketUserMap = {};
+
 // Socket.IO Logic
 io.on('connection', (socket) => {
     console.log('New client connected:', socket.id);
 
     socket.on('join_queue', ({ userId }) => {
-        // Check if user already in queue
-        if (queue.find(q => q.userId === userId)) return;
+        if (!userId) {
+            console.log('join_queue received with no userId, ignoring');
+            return;
+        }
 
-        queue.push({ socketId: socket.id, userId });
+        // Register socket -> user mapping
+        socketUserMap[socket.id] = userId;
+
+        // Check if user already in queue (by userId)
+        const alreadyInQueue = queue.find(q => q.userId === String(userId));
+        if (alreadyInQueue) {
+            console.log(`User ${userId} already in queue, updating socketId`);
+            alreadyInQueue.socketId = socket.id;
+            return;
+        }
+
+        queue.push({ socketId: socket.id, userId: String(userId) });
         console.log(`User ${userId} joined queue. Queue length: ${queue.length}`);
 
         if (queue.length >= 2) {
@@ -64,14 +85,40 @@ io.on('connection', (socket) => {
             const roomId = Math.random().toString(36).substring(2, 9);
 
             console.log(`Matching ${player1.userId} vs ${player2.userId} in room ${roomId}`);
+
+            // Pre-populate the active game with correct colors so join_game works
+            activeGames[roomId] = {
+                chess: new Chess(),
+                white: player1.userId,
+                black: player2.userId
+            };
+
             io.to(player1.socketId).emit('game_found', { roomId, color: 'w' });
             io.to(player2.socketId).emit('game_found', { roomId, color: 'b' });
         }
     });
 
+    socket.on('leave_queue', ({ userId }) => {
+        const index = queue.findIndex(q => q.userId === String(userId));
+        if (index !== -1) {
+            queue.splice(index, 1);
+            console.log(`User ${userId} left queue. Queue length: ${queue.length}`);
+        }
+    });
+
+
     socket.on('join_game', async ({ roomId, userId }) => {
+        userId = userId ? String(userId) : null;
         socket.join(roomId);
         console.log(`User ${userId || 'anon'} joined room: ${roomId}`);
+
+        // Also join chat room with same ID
+        socket.join(`chat_${roomId}`);
+
+        // Register socket -> user mapping
+        if (userId) {
+            socketUserMap[socket.id] = userId;
+        }
 
         if (!activeGames[roomId]) {
             // Check DB for existing game or creating new
@@ -96,30 +143,61 @@ io.on('connection', (socket) => {
 
         const room = activeGames[roomId];
 
-        // Assign roles if needed
+        // Assign roles — enforce 2-player limit
         let myColor = null;
         if (userId) {
-            if (room.white === userId) myColor = 'w';
-            else if (room.black === userId) myColor = 'b';
-            else if (!room.white) {
+            // Check if user is already in this room (reconnect)
+            if (room.white === userId) {
+                myColor = 'w';
+            } else if (room.black === userId) {
+                myColor = 'b';
+            } else if (!room.white) {
+                // Open white slot
                 room.white = userId;
                 myColor = 'w';
             } else if (!room.black) {
+                // Open black slot
                 room.black = userId;
                 myColor = 'b';
+            } else {
+                // Room is full — spectator mode
+                console.log(`Room ${roomId} is full. User ${userId} joins as spectator.`);
+                myColor = null;
             }
         }
 
-        // Notify user
+        // Notify user with opponent info
+        let opponentId = null;
+        let opponentInfo = null;
+
+        if (myColor === 'w' && room.black) {
+            opponentId = room.black;
+        } else if (myColor === 'b' && room.white) {
+            opponentId = room.white;
+        }
+
+        if (opponentId) {
+            const opponent = await User.findById(opponentId).select('username rating');
+            if (opponent) {
+                opponentInfo = {
+                    name: opponent.username,
+                    rating: opponent.rating?.rapid || 1200
+                };
+            }
+        }
+
         socket.emit('game_state', {
             fen: room.chess.fen(),
             turn: room.chess.turn(),
             color: myColor,
-            history: room.chess.history()
+            history: room.chess.history(),
+            isSpectator: myColor === null && room.white && room.black,
+            opponentInfo: opponentInfo || { name: 'Waiting for opponent...', rating: '---' }
         });
     });
 
     socket.on('make_move', async ({ roomId, move, userId }) => {
+        userId = userId ? String(userId) : null;
         const room = activeGames[roomId];
 
         if (!room) return;
@@ -185,26 +263,47 @@ io.on('connection', (socket) => {
                 // Update ratings if game finished
                 if (isOver) {
                     const winner = game.isCheckmate() ? (game.turn() === 'w' ? 'black' : 'white') : 'draw';
-                    let whiteChange = 0;
-                    let blackChange = 0;
-
-                    if (winner === 'white') {
-                        whiteChange = 15;
-                        blackChange = -15;
-                    } else if (winner === 'black') {
-                        whiteChange = -15;
-                        blackChange = 15;
-                    }
 
                     if (room.white && room.black) {
                         try {
-                            await User.findByIdAndUpdate(room.white, { $inc: { 'rating.rapid': whiteChange } });
-                            await User.findByIdAndUpdate(room.black, { $inc: { 'rating.rapid': blackChange } });
+                            // Fetch current ratings
+                            const whiteUser = await User.findById(room.white);
+                            const blackUser = await User.findById(room.black);
 
-                            io.to(roomId).emit('rating_update', {
-                                white: whiteChange,
-                                black: blackChange
-                            });
+                            if (whiteUser && blackUser) {
+                                const whiteRating = whiteUser.rating.rapid;
+                                const blackRating = blackUser.rating.rapid;
+
+                                // Simple ELO calculation
+                                const K = 32; // K-factor
+                                const expectedWhite = 1 / (1 + Math.pow(10, (blackRating - whiteRating) / 400));
+                                const expectedBlack = 1 / (1 + Math.pow(10, (whiteRating - blackRating) / 400));
+
+                                let scoreWhite, scoreBlack;
+                                if (winner === 'white') {
+                                    scoreWhite = 1;
+                                    scoreBlack = 0;
+                                } else if (winner === 'black') {
+                                    scoreWhite = 0;
+                                    scoreBlack = 1;
+                                } else {
+                                    scoreWhite = 0.5;
+                                    scoreBlack = 0.5;
+                                }
+
+                                const whiteChange = Math.round(K * (scoreWhite - expectedWhite));
+                                const blackChange = Math.round(K * (scoreBlack - expectedBlack));
+
+                                await User.findByIdAndUpdate(room.white, { $inc: { 'rating.rapid': whiteChange } });
+                                await User.findByIdAndUpdate(room.black, { $inc: { 'rating.rapid': blackChange } });
+
+                                io.to(roomId).emit('rating_update', {
+                                    white: whiteChange,
+                                    black: blackChange
+                                });
+
+                                console.log(`Rating updated: White +${whiteChange}, Black +${blackChange}`);
+                            }
                         } catch (err) {
                             console.error('Error updating ratings:', err);
                         }
@@ -215,6 +314,84 @@ io.on('connection', (socket) => {
             console.error('Invalid move attempt:', e);
             socket.emit('error', { message: 'Invalid move: ' + e.message });
         }
+    });
+
+    socket.on('resign', async ({ roomId, userId }) => {
+        userId = userId ? String(userId) : null;
+        const room = activeGames[roomId];
+        if (!room || !userId) return;
+
+        // Prevent duplicate resignations
+        if (room.resigned) {
+            console.log(`Room ${roomId} already resigned, ignoring duplicate`);
+            return;
+        }
+        room.resigned = true;
+
+        // Determine who resigned and who wins
+        let resignerColor = null;
+        let winnerColor = null;
+
+        if (room.white === userId) {
+            resignerColor = 'white';
+            winnerColor = 'black';
+        } else if (room.black === userId) {
+            resignerColor = 'black';
+            winnerColor = 'white';
+        } else {
+            return; // Spectator can't resign
+        }
+
+        const RESIGN_PENALTY = 15;
+        const resultText = winnerColor === 'white' ? 'White Wins (Resignation)' : 'Black Wins (Resignation)';
+
+        console.log(`User ${userId} (${resignerColor}) resigned in room ${roomId}`);
+
+        // Notify all players in the room
+        io.to(roomId).emit('game_resigned', {
+            resignedBy: resignerColor,
+            result: resultText,
+            winner: winnerColor
+        });
+
+        // Update DB
+        try {
+            await Game.findOneAndUpdate(
+                { roomId },
+                {
+                    status: 'finished',
+                    winner: winnerColor,
+                    fen: room.chess.fen(),
+                    finishedAt: new Date()
+                },
+                { upsert: true, new: true }
+            );
+        } catch (err) {
+            console.error('Error saving resigned game:', err);
+        }
+
+        // Update ratings: flat ±15 for resign
+        if (room.white && room.black) {
+            try {
+                const whiteChange = winnerColor === 'white' ? RESIGN_PENALTY : -RESIGN_PENALTY;
+                const blackChange = winnerColor === 'black' ? RESIGN_PENALTY : -RESIGN_PENALTY;
+
+                await User.findByIdAndUpdate(room.white, { $inc: { 'rating.rapid': whiteChange } });
+                await User.findByIdAndUpdate(room.black, { $inc: { 'rating.rapid': blackChange } });
+
+                io.to(roomId).emit('rating_update', {
+                    white: whiteChange,
+                    black: blackChange
+                });
+
+                console.log(`Resign rating update: White ${whiteChange > 0 ? '+' : ''}${whiteChange}, Black ${blackChange > 0 ? '+' : ''}${blackChange}`);
+            } catch (err) {
+                console.error('Error updating ratings on resign:', err);
+            }
+        }
+
+        // Clean up active game
+        delete activeGames[roomId];
     });
 
     socket.on('reset_game', async ({ roomId, userId }) => {
@@ -247,6 +424,7 @@ io.on('connection', (socket) => {
             queue.splice(index, 1);
             console.log(`User removed from queue. Queue length: ${queue.length}`);
         }
+        delete socketUserMap[socket.id];
         console.log('User disconnected:', socket.id);
     });
 });

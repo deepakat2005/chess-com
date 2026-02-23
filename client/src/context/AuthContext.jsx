@@ -103,9 +103,11 @@ export const AuthProvider = ({ children }) => {
                 payload: res.data
             });
         } catch (err) {
+            console.error("Login error:", err);
+            const errorMessage = err.response?.data?.msg || 'Login failed. Please check your connection.';
             dispatch({
                 type: 'LOGIN_FAIL',
-                payload: err.response.data.msg
+                payload: errorMessage
             });
         }
     };

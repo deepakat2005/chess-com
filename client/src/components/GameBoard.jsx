@@ -71,6 +71,7 @@ const GameBoard = () => {
     const [promotionMove, setPromotionMove] = useState(null);
     const [showPromotionModal, setShowPromotionModal] = useState(false);
     const [ratingChange, setRatingChange] = useState(null);
+    const [opponentInfo, setOpponentInfo] = useState({ name: 'Opponent', rating: 1200 });
     const engine = useRef(null);
     const [engineReady, setEngineReady] = useState(false);
 
@@ -161,13 +162,27 @@ const GameBoard = () => {
                 setEngineReady(false);
             }
         };
-    }, [gameMode]);    // Socket Logic
+    }, [gameMode]);
+
+    // Use a ref for playerColor so socket handlers always see the latest value
+    const playerColorRef = useRef(playerColor);
+    useEffect(() => {
+        playerColorRef.current = playerColor;
+    }, [playerColor]);
+
+    // Socket Logic
     useEffect(() => {
         if (gameMode === 'online' && user) {
-            socket.emit('join_game', { roomId, userId: user.id || user._id });
+            const userId = user.id || user._id;
+            console.log('Socket: joining game room', roomId, 'as user', userId);
+            socket.emit('join_game', { roomId, userId });
 
-            socket.on('game_state', ({ fen, color, history: serverHistory }) => {
+            const handleGameState = ({ fen, color, history: serverHistory, opponentInfo: oppInfo }) => {
+                console.log('Socket: received game_state, color:', color);
                 const savedGame = sessionStorage.getItem(`game_${roomId}`);
+                if (oppInfo) {
+                    setOpponentInfo(oppInfo);
+                }
                 if (savedGame) {
                     const { fen: savedFen, gameResult: savedResult, playerColor: savedColor, lastMove, history: savedHistory } = JSON.parse(savedGame);
                     setGame(new Chess(savedFen));
@@ -180,9 +195,9 @@ const GameBoard = () => {
                     setHistory(serverHistory || []);
                     setPlayerColor(color);
                 }
-            });
+            };
 
-            socket.on('receive_move', ({ move, fen, history: serverHistory, result }) => {
+            const handleReceiveMove = ({ move, fen, history: serverHistory, result }) => {
                 setGame(currentGame => {
                     if (currentGame.fen() === fen) return currentGame;
 
@@ -190,7 +205,7 @@ const GameBoard = () => {
                     setTimeout(() => {
                         const newGame = new Chess(fen);
                         setGame(newGame);
-                        setHistory(serverHistory); // Update history state
+                        setHistory(serverHistory);
                         setSelectedSquare(null);
                         setMoveSquares({});
                         highlightLastMove(move, newGame);
@@ -200,78 +215,86 @@ const GameBoard = () => {
                         setBoardLocked(false);
                     }, 350);
 
-                    // Save to sessionStorage
+                    // Save to sessionStorage using ref for latest playerColor
                     sessionStorage.setItem(`game_${roomId}`, JSON.stringify({
                         fen,
                         gameResult: result,
-                        playerColor,
+                        playerColor: playerColorRef.current,
                         lastMove: move,
                         history: serverHistory
                     }));
 
                     return currentGame;
                 });
-            });
+            };
 
-            socket.on('game_found', ({ roomId: newRoomId, color }) => {
-                setFindingMatch(false);
-                setRoomId(newRoomId);
-                setPlayerColor(color);
-                sessionStorage.setItem('currentRoom', newRoomId);
-                // Update URL
-                const newUrl = `${window.location.pathname}?mode=online&room=${newRoomId}`;
-                window.history.replaceState(null, '', newUrl);
-            });
-
-            socket.on('game_reset', ({ fen }) => {
+            const handleGameReset = ({ fen }) => {
                 setGame(new Chess(fen));
                 setGameResult(null);
                 setLastMoveSquares({});
                 setSelectedSquare(null);
                 setMoveSquares({});
-                setHistory([]); // Clear history on reset
-            });
+                setHistory([]);
+            };
 
-            socket.on('rating_update', (data) => {
+            const handleRatingUpdate = (data) => {
                 setRatingChange(data);
-                loadUser(); // Refresh user data to get new rating
-            });
+                loadUser();
+            };
+
+            const handleGameResigned = ({ resignedBy, result, winner }) => {
+                console.log('Game resigned by', resignedBy, '- result:', result);
+                // Determine if I resigned or my opponent resigned
+                const myColorStr = playerColorRef.current === 'w' ? 'white' : 'black';
+                if (resignedBy === myColorStr) {
+                    setGameResult('You Resigned — You Lose');
+                } else {
+                    setGameResult('Opponent Resigned — You Win! 🎉');
+                }
+                setBoardLocked(true);
+            };
+
+            socket.on('game_state', handleGameState);
+            socket.on('receive_move', handleReceiveMove);
+            socket.on('game_reset', handleGameReset);
+            socket.on('rating_update', handleRatingUpdate);
+            socket.on('game_resigned', handleGameResigned);
 
             return () => {
-                socket.off('game_state');
-                socket.off('receive_move');
-                socket.off('game_found');
-                socket.off('game_reset');
-                socket.off('rating_update');
+                socket.off('game_state', handleGameState);
+                socket.off('receive_move', handleReceiveMove);
+                socket.off('game_reset', handleGameReset);
+                socket.off('rating_update', handleRatingUpdate);
+                socket.off('game_resigned', handleGameResigned);
             };
         }
-    }, [roomId, gameMode, user, playerColor]); // Added playerColor to dependencies
+    }, [roomId, gameMode, user]); // Removed playerColor — use ref instead
 
-    // Timer Logic (commented out for testing)
-    // useEffect(() => {
-    //     if (gameMode === 'online' && !gameResult) {
-    //         const interval = setInterval(() => {
-    //             if (game.turn() === 'w') {
-    //                 setWhiteTime(prev => {
-    //                     if (prev <= 1) {
-    //                         setGameResult('Black Wins (Time)');
-    //                         return 0;
-    //                     }
-    //                     return prev - 1;
-    //                 });
-    //             } else {
-    //                 setBlackTime(prev => {
-    //                     if (prev <= 1) {
-    //                         setGameResult('White Wins (Time)');
-    //                         return 0;
-    //                     }
-    //                         return prev - 1;
-    //                 });
-    //             }
-    //         }, 1000);
-    //         return () => clearInterval(interval);
-    //     }
-    // }, [game, gameMode, gameResult]);
+    // Timer Logic
+    useEffect(() => {
+        if (gameMode === 'online' && !gameResult) {
+            const interval = setInterval(() => {
+                if (game.turn() === 'w') {
+                    setWhiteTime(prev => {
+                        if (prev <= 0) {
+                            setGameResult('Black Wins (Time)');
+                            return 0;
+                        }
+                        return prev - 1;
+                    });
+                } else {
+                    setBlackTime(prev => {
+                        if (prev <= 0) {
+                            setGameResult('White Wins (Time)');
+                            return 0;
+                        }
+                        return prev - 1;
+                    });
+                }
+            }, 1000);
+            return () => clearInterval(interval);
+        }
+    }, [game, gameMode, gameResult]);
 
     // Trigger Computer Move
     useEffect(() => {
@@ -672,78 +695,52 @@ const GameBoard = () => {
 
     function resetMatch() {
         if (gameMode === 'online' && user) {
-            socket.emit('reset_game', { roomId, userId: user.id });
+            socket.emit('reset_game', { roomId, userId: user.id || user._id });
         } else {
             resetGame();
+        }
+    }
+
+    function resignGame() {
+        if (gameMode === 'online' && user && playerColor && !gameResult) {
+            const confirmResign = window.confirm('Are you sure you want to resign? You will lose 15 rating points.');
+            if (confirmResign) {
+                setGameResult('You Resigned');
+                setBoardLocked(true);
+                socket.emit('resign', { roomId, userId: user.id || user._id });
+            }
         }
     }
 
     return (
         <ErrorBoundary>
             <div className="flex flex-col items-center justify-center p-4 min-h-screen bg-gray-900">
-                <h2 className="text-3xl font-bold text-white mb-6">Play Chess</h2>
+                <nav className="w-full max-w-6xl mb-6 flex justify-between items-center bg-gray-800 p-4 rounded-lg shadow-lg">
+                    <button
+                        onClick={() => window.location.href = '/dashboard'}
+                        className="text-gray-400 hover:text-white flex items-center gap-2 font-bold px-3 py-1 rounded transition hover:bg-gray-700"
+                    >
+                        <span>← Back to Dashboard</span>
+                    </button>
+                    <h2 className="text-xl font-bold text-white text-center flex-1">
+                        {gameMode === 'online' ? `Game Room: ${roomId}` : 'Vs Stockfish'}
+                    </h2>
+                </nav>
 
-                <div className="mb-4 text-gray-400 flex flex-col items-center">
-                    <div className="flex space-x-4 mb-2">
-                        <button
-                            onClick={() => { setGameMode('online'); resetGame(); }}
-                            className={`px-4 py-2 rounded font-bold ${gameMode === 'online' ? 'bg-blue-600 text-white' : 'bg-gray-700'}`}
-                        >
-                            Online
-                        </button>
-                        <button
-                            onClick={() => { setGameMode('computer'); resetGame(); }}
-                            className={`px-4 py-2 rounded font-bold ${gameMode === 'computer' ? 'bg-blue-600 text-white' : 'bg-gray-700'}`}
-                        >
-                            Vs Computer
-                        </button>
-                    </div>
-
-                    {gameMode === 'online' && (
-                        <div className="flex flex-col items-center space-y-2">
-                            <span>Room ID: <span className="font-mono text-green-400">{roomId}</span></span>
-                            {!playerColor && !findingMatch && (
-                                <button
-                                    onClick={findRandomMatch}
-                                    className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition"
-                                >
-                                    Find Random Match
-                                </button>
-                            )}
-                            {findingMatch && (
-                                <div className="text-yellow-400 font-bold animate-pulse">Finding match...</div>
-                            )}
-                            {playerColor && (
-                                <div className="text-blue-400 font-bold">You are {playerColor === 'w' ? 'White' : 'Black'}</div>
-                            )}
-                        </div>
-                    )}
-                    {error && (
-                        <div className="text-red-500 text-center mt-2">{error}</div>
-                    )}
-                </div>
-
-                {/* Time Display (commented out for testing) */}
-                {/* {gameMode === 'online' && (
-                <div className="flex justify-center space-x-8 mb-4 text-white">
-                    <div className="text-center">
-                        <div className="text-sm text-gray-400">White</div>
-                        <div className={`text-xl font-mono ${game.turn() === 'w' ? 'text-green-400' : 'text-gray-300'}`}>
-                            {Math.floor(whiteTime / 60)}:{(whiteTime % 60).toString().padStart(2, '0')}
-                        </div>
-                    </div>
-                    <div className="text-center">
-                        <div className="text-sm text-gray-400">Black</div>
-                        <div className={`text-xl font-mono ${game.turn() === 'b' ? 'text-green-400' : 'text-gray-300'}`}>
-                            {Math.floor(blackTime / 60)}:{(blackTime % 60).toString().padStart(2, '0')}
-                        </div>
-                    </div>
-                </div>
-            )} */}
-
-                <div className="flex flex-col lg:flex-row gap-8 items-stretch justify-center w-full max-w-6xl">
+                <div className="flex flex-col lg:flex-row gap-8 items-start justify-center w-full max-w-6xl">
                     {/* Left Side: Game Board */}
                     <div className="w-full lg:w-[600px] flex flex-col items-center">
+                        <div className="flex justify-between w-full mb-2 px-2 text-gray-300 font-mono text-sm">
+                            <div className="flex items-center gap-2">
+                                <span className={`w-3 h-3 rounded-full ${game.turn() === 'b' ? 'bg-green-500 animate-pulse' : 'bg-gray-600'}`}></span>
+                                <span>Black ({Math.floor(blackTime / 60)}:{(blackTime % 60).toString().padStart(2, '0')})</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span>White ({Math.floor(whiteTime / 60)}:{(whiteTime % 60).toString().padStart(2, '0')})</span>
+                                <span className={`w-3 h-3 rounded-full ${game.turn() === 'w' ? 'bg-white animate-pulse' : 'bg-gray-600'}`}></span>
+                            </div>
+                        </div>
+
                         <div className={`relative w-full aspect-square shadow-2xl border-4 ${gameResult ? 'border-yellow-500' : 'border-gray-700'} rounded-lg overflow-hidden bg-gray-800`}>
                             <div className="w-full h-full">
                                 <Chessboard
@@ -843,6 +840,22 @@ const GameBoard = () => {
 
                     {/* Right Side: Game Info & Moves */}
                     <div className="flex-1 flex flex-col min-w-[300px] max-h-[600px]">
+                        {gameMode === 'online' && playerColor && (
+                            <div className="bg-gray-800 rounded-t-lg border border-gray-700 border-b-0 p-4 shadow-xl">
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className={`p-3 rounded-lg ${playerColor === 'w' ? 'bg-blue-900/40 border border-blue-600' : 'bg-gray-700/40 border border-gray-600'}`}>
+                                        <div className="text-xs text-gray-400 uppercase tracking-wide">White</div>
+                                        <div className="text-lg font-bold text-white">{user?.username || 'White'}</div>
+                                        <div className="text-sm text-gray-300">{user?.rating?.rapid || 1200} ELO</div>
+                                    </div>
+                                    <div className={`p-3 rounded-lg ${playerColor === 'b' ? 'bg-blue-900/40 border border-blue-600' : 'bg-gray-700/40 border border-gray-600'}`}>
+                                        <div className="text-xs text-gray-400 uppercase tracking-wide">Black</div>
+                                        <div className="text-lg font-bold text-white">{opponentInfo.name || 'Black'}</div>
+                                        <div className="text-sm text-gray-300">{opponentInfo.rating || 1200} ELO</div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                         <div className="bg-gray-800 rounded-lg border border-gray-700 flex-1 flex flex-col overflow-hidden shadow-xl">
                             <div className="p-4 border-b border-gray-700 bg-gray-750">
                                 <h3 className="text-lg font-bold text-white flex items-center">
@@ -879,12 +892,12 @@ const GameBoard = () => {
                             </div>
 
                             <div className="p-4 border-t border-gray-700 bg-gray-750 flex justify-between gap-2">
-                                {gameMode === 'online' && playerColor && (
+                                {gameMode === 'online' && playerColor && !gameResult && (
                                     <button
-                                        onClick={resetMatch}
-                                        className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition text-sm"
+                                        onClick={resignGame}
+                                        className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition text-sm flex items-center justify-center gap-2"
                                     >
-                                        Resign
+                                        🏳️ Resign
                                     </button>
                                 )}
                                 <button

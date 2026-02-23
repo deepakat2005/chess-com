@@ -72,6 +72,7 @@ router.post('/register', async (req, res) => {
 // @access  Public
 router.post('/login', async (req, res) => {
     const { email, password } = req.body; // 'email' field now handles both email and username
+    console.log('Login attempt received for:', email);
 
     try {
         // Try to find user by email OR username

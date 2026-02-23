@@ -6,21 +6,27 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5002/api';
 const Leaderboard = () => {
     const [users, setUsers] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [lastRefresh, setLastRefresh] = useState(new Date());
+
+    const fetchLeaderboard = async () => {
+        try {
+            setLoading(true);
+            const res = await fetch(`${API_URL}/games/leaderboard`);
+            const data = await res.json();
+            setUsers(data);
+            setLastRefresh(new Date());
+        } catch (err) {
+            console.error("Failed to fetch leaderboard", err);
+        } finally {
+            setLoading(false);
+        }
+    };
 
     useEffect(() => {
-        const fetchLeaderboard = async () => {
-            try {
-                const res = await fetch(`${API_URL}/games/leaderboard`);
-                const data = await res.json();
-                setUsers(data);
-                setLoading(false);
-            } catch (err) {
-                console.error("Failed to fetch leaderboard", err);
-                setLoading(false);
-            }
-        };
-
         fetchLeaderboard();
+        // Auto-refresh every 30 seconds
+        const interval = setInterval(fetchLeaderboard, 30000);
+        return () => clearInterval(interval);
     }, []);
 
     return (
@@ -30,10 +36,19 @@ const Leaderboard = () => {
             </h1>
 
             <div className="w-full max-w-3xl bg-gray-800/50 backdrop-blur-md rounded-2xl shadow-2xl border border-gray-700 overflow-hidden animate-in fade-in slide-in-from-bottom-5 duration-700">
-                <div className="bg-gray-700/80 p-5 grid grid-cols-4 font-bold text-gray-400 uppercase tracking-wider text-sm border-b border-gray-600">
-                    <div className="col-span-1 text-center">Rank</div>
-                    <div className="col-span-2">Player</div>
-                    <div className="col-span-1 text-right px-4">Rating</div>
+                <div className="bg-gray-700/80 p-5 flex justify-between items-center border-b border-gray-600">
+                    <div className="grid grid-cols-4 font-bold text-gray-400 uppercase tracking-wider text-sm flex-1">
+                        <div className="col-span-1 text-center">Rank</div>
+                        <div className="col-span-2">Player</div>
+                        <div className="col-span-1 text-right px-4">Rating</div>
+                    </div>
+                    <button
+                        onClick={fetchLeaderboard}
+                        disabled={loading}
+                        className="ml-4 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white px-3 py-1 rounded text-sm font-bold transition"
+                    >
+                        {loading ? '⟳ Loading...' : '⟳ Refresh'}
+                    </button>
                 </div>
 
                 {loading ? (
@@ -85,6 +100,7 @@ const Leaderboard = () => {
                 <span className="transform group-hover:-translate-x-1 transition-transform">←</span>
                 <span className="font-medium">Return to Arena</span>
             </Link>
+            <p className="mt-4 text-xs text-gray-500">Last updated: {lastRefresh.toLocaleTimeString()}</p>
         </div>
     );
 };
