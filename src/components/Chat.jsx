@@ -45,7 +45,7 @@ const Chat = ({ roomId, user }) => {
     };
 
     return (
-        <div className="flex flex-col h-[600px] w-full bg-gray-800 rounded-lg shadow-lg border border-gray-700">
+        <div className="flex flex-col h-150 w-full bg-gray-800 rounded-lg shadow-lg border border-gray-700">
             <div className="p-4 border-b border-gray-700 bg-gray-900 rounded-t-lg">
                 <h3 className="text-lg font-bold text-white flex items-center gap-2">
                     <span>💬</span> Game Chat

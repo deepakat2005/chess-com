@@ -2,7 +2,7 @@ import { createContext, useReducer, useEffect } from 'react';
 import axios from 'axios';
 import setAuthToken from '../utils/setAuthToken';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5002/api';
+const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5002/api' : '/api');
 
 const initialState = {
     token: sessionStorage.getItem('token'),

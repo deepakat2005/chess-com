@@ -246,15 +246,42 @@ const GameBoard = () => {
                 console.log('Game resigned by', resignedBy, '- result:', result);
                 // Determine if I resigned or my opponent resigned
                 const myColorStr = playerColorRef.current === 'w' ? 'white' : 'black';
+                // Use server-provided result when available for consistency
                 if (resignedBy === myColorStr) {
-                    setGameResult('You Resigned — You Lose');
+                    setGameResult(result || 'You Resigned — You Lose');
                 } else {
-                    setGameResult('Opponent Resigned — You Win! 🎉');
+                    setGameResult(result || 'Opponent Resigned — You Win! 🎉');
                 }
+
+                // Persist final state so resume/viewing works consistently
+                try {
+                    sessionStorage.setItem(`game_${roomId}`, JSON.stringify({
+                        fen: game.fen(),
+                        gameResult: result || (resignedBy === myColorStr ? 'You Resigned' : 'Opponent Resigned'),
+                        playerColor: playerColorRef.current,
+                        lastMove: null,
+                        history
+                    }));
+                } catch (e) {
+                    console.warn('Failed to save resigned game to sessionStorage', e);
+                }
+
                 setBoardLocked(true);
             };
 
             socket.on('game_state', handleGameState);
+            const handleGameFound = ({ roomId: foundRoomId, color }) => {
+                console.log('Socket: game_found', foundRoomId, color);
+                setFindingMatch(false);
+                setRoomId(foundRoomId);
+                setPlayerColor(color);
+                sessionStorage.setItem('currentRoom', foundRoomId);
+                // update url without reload
+                const newUrl = `${window.location.pathname}?mode=online&room=${foundRoomId}`;
+                window.history.replaceState(null, '', newUrl);
+            };
+
+            socket.on('game_found', handleGameFound);
             socket.on('receive_move', handleReceiveMove);
             socket.on('game_reset', handleGameReset);
             socket.on('rating_update', handleRatingUpdate);
@@ -262,6 +289,7 @@ const GameBoard = () => {
 
             return () => {
                 socket.off('game_state', handleGameState);
+                socket.off('game_found', handleGameFound);
                 socket.off('receive_move', handleReceiveMove);
                 socket.off('game_reset', handleGameReset);
                 socket.off('rating_update', handleRatingUpdate);
@@ -269,6 +297,15 @@ const GameBoard = () => {
             };
         }
     }, [roomId, gameMode, user]); // Removed playerColor — use ref instead
+
+    // If the user navigates away while searching, ensure we leave the queue
+    useEffect(() => {
+        return () => {
+            if (findingMatch && user) {
+                socket.emit('leave_queue', { userId: user.id || user._id });
+            }
+        };
+    }, [findingMatch, user]);
 
     // Timer Logic
     useEffect(() => {
@@ -705,8 +742,23 @@ const GameBoard = () => {
         if (gameMode === 'online' && user && playerColor && !gameResult) {
             const confirmResign = window.confirm('Are you sure you want to resign? You will lose 15 rating points.');
             if (confirmResign) {
-                setGameResult('You Resigned');
+                // Immediately stop the game locally and persist state
+                const resultText = 'You Resigned — You Lose';
+                setGameResult(resultText);
                 setBoardLocked(true);
+
+                try {
+                    sessionStorage.setItem(`game_${roomId}`, JSON.stringify({
+                        fen: game.fen(),
+                        gameResult: resultText,
+                        playerColor,
+                        lastMove: null,
+                        history
+                    }));
+                } catch (e) {
+                    console.warn('Failed to save resigned game to sessionStorage', e);
+                }
+
                 socket.emit('resign', { roomId, userId: user.id || user._id });
             }
         }
@@ -729,7 +781,7 @@ const GameBoard = () => {
 
                 <div className="flex flex-col lg:flex-row gap-8 items-start justify-center w-full max-w-6xl">
                     {/* Left Side: Game Board */}
-                    <div className="w-full lg:w-[600px] flex flex-col items-center">
+                    <div className="w-full lg:w-150 flex flex-col items-center">
                         <div className="flex justify-between w-full mb-2 px-2 text-gray-300 font-mono text-sm">
                             <div className="flex items-center gap-2">
                                 <span className={`w-3 h-3 rounded-full ${game.turn() === 'b' ? 'bg-green-500 animate-pulse' : 'bg-gray-600'}`}></span>
@@ -820,7 +872,7 @@ const GameBoard = () => {
                         </div>
 
                         <div className="mt-6 flex gap-4 flex-wrap justify-center w-full">
-                            <div className="text-xl text-gray-300 font-semibold bg-gray-800 px-6 py-2 rounded-lg border border-gray-700 flex-1 text-center min-w-[200px]">
+                            <div className="text-xl text-gray-300 font-semibold bg-gray-800 px-6 py-2 rounded-lg border border-gray-700 flex-1 text-center min-w-50">
                                 Turn: <span className={game.turn() === 'w' ? 'text-green-400' : 'text-yellow-400'}>
                                     {game.turn() === 'w' ? 'White' : 'Black'}
                                 </span>
@@ -839,7 +891,7 @@ const GameBoard = () => {
                     </div>
 
                     {/* Right Side: Game Info & Moves */}
-                    <div className="flex-1 flex flex-col min-w-[300px] max-h-[600px]">
+                    <div className="flex-1 flex flex-col min-w-75 max-h-150">
                         {gameMode === 'online' && playerColor && (
                             <div className="bg-gray-800 rounded-t-lg border border-gray-700 border-b-0 p-4 shadow-xl">
                                 <div className="grid grid-cols-2 gap-4">
